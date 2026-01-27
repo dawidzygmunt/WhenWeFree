@@ -1,0 +1,74 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id        String   @id @default(cuid())
+  clerkId   String   @unique
+  email     String   @unique
+  name      String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  events Event[]
+}
+
+model Event {
+  id          String   @id @default(cuid())
+  slug        String   @unique
+  title       String
+  description String?
+
+  startDate    DateTime
+  endDate      DateTime
+  startTime    Int      // Minutes from midnight (e.g., 960 = 16:00)
+  endTime      Int      // Minutes from midnight (e.g., 1380 = 23:00)
+  slotDuration Int      @default(30)
+  timezone     String   @default("Europe/Warsaw")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  creatorId String
+  creator   User   @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+
+  participants Participant[]
+
+  @@index([slug])
+  @@index([creatorId])
+}
+
+model Participant {
+  id        String   @id @default(cuid())
+  name      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  eventId String
+  event   Event  @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  availabilities Availability[]
+
+  @@unique([eventId, name])
+  @@index([eventId])
+}
+
+model Availability {
+  id        String   @id @default(cuid())
+  date      DateTime
+  startTime Int
+  endTime   Int
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  participantId String
+  participant   Participant @relation(fields: [participantId], references: [id], onDelete: Cascade)
+
+  @@unique([participantId, date, startTime])
+  @@index([participantId])
+}
