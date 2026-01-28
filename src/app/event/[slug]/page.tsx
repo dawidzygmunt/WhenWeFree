@@ -1,7 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback, use } from "react";
-import { useRouter } from "next/navigation";
+import { useEffect, useState, useCallback, use, useRef } from "react";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import {
@@ -31,6 +30,7 @@ import { pl } from "date-fns/locale";
 import { formatTimeForDisplay } from "@/lib/time-utils";
 import { toast } from "sonner";
 import { Toaster } from "@/components/ui/sonner";
+import { useIsMobile } from "@/hooks/use-is-mobile";
 
 interface TimeSlot {
   date: string;
@@ -68,7 +68,6 @@ export default function EventPage({
   params: Promise<{ slug: string }>;
 }) {
   const resolvedParams = use(params);
-  const router = useRouter();
 
   const [loading, setLoading] = useState(true);
   const [eventData, setEventData] = useState<EventData | null>(null);
@@ -86,6 +85,13 @@ export default function EventPage({
 
   // View mode
   const [viewMode, setViewMode] = useState<"edit" | "view">("edit");
+
+  // Mobile detection
+  const isMobile = useIsMobile();
+
+  // Refs for debouncing and request cancellation
+  const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   // Fetch event data
   useEffect(() => {
@@ -197,9 +203,9 @@ export default function EventPage({
     }
   };
 
-  // Save availability (debounced)
+  // Save availability with AbortController to cancel in-flight requests
   const saveAvailability = useCallback(
-    async (slots: TimeSlot[]) => {
+    async (slots: TimeSlot[], signal: AbortSignal) => {
       if (!participantId) return;
 
       setSaving(true);
@@ -214,11 +220,14 @@ export default function EventPage({
               participantId,
               slots,
             }),
+            signal,
           }
         );
 
         if (!response.ok) {
-          throw new Error("Failed to save");
+          const errorData = await response.json().catch(() => ({}));
+          console.error("Save failed:", response.status, errorData);
+          throw new Error(errorData.error || "Failed to save");
         }
 
         setLastSaved(new Date());
@@ -233,11 +242,15 @@ export default function EventPage({
           })
         );
 
-        // Refresh event data for heatmap
-        const eventResponse = await fetch(`/api/events/${resolvedParams.slug}`);
+        // Refresh event data for heatmap (also cancellable)
+        const eventResponse = await fetch(`/api/events/${resolvedParams.slug}`, { signal });
         const eventDataNew = await eventResponse.json();
         setEventData(eventDataNew);
       } catch (err) {
+        // Don't show error if request was aborted (user clicked again)
+        if (err instanceof Error && err.name === "AbortError") {
+          return;
+        }
         console.error("Error saving availability:", err);
         toast.error("Nie udało się zapisać zmian");
       } finally {
@@ -247,19 +260,34 @@ export default function EventPage({
     [participantId, resolvedParams.slug, participantName, eventData?.event.id]
   );
 
-  // Handle selection change with debounce
+  // Handle selection change with proper debounce and request cancellation
   const handleSelectionChange = useCallback(
     (slots: TimeSlot[]) => {
       setSelectedSlots(slots);
 
-      // Debounce save
-      const timeout = setTimeout(() => {
-        saveAvailability(slots);
-      }, 500);
+      // Don't save if not logged in as participant
+      if (!participantId) return;
 
-      return () => clearTimeout(timeout);
+      // Clear previous timeout
+      if (saveTimeoutRef.current) {
+        clearTimeout(saveTimeoutRef.current);
+      }
+
+      // Abort previous in-flight request
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+
+      // Create new AbortController for this request
+      const abortController = new AbortController();
+      abortControllerRef.current = abortController;
+
+      // Debounce save with longer delay
+      saveTimeoutRef.current = setTimeout(() => {
+        saveAvailability(slots, abortController.signal);
+      }, 600);
     },
-    [saveAvailability]
+    [saveAvailability, participantId]
   );
 
   if (loading) {
@@ -437,12 +465,44 @@ export default function EventPage({
             </CardTitle>
             <CardDescription>
               {viewMode === "edit"
-                ? "Kliknij i przeciągnij, aby zaznaczyć kiedy jesteś dostępny"
+                ? (isMobile
+                    ? "Dotknij sloty lub nagłówki dni, aby zaznaczać dostępność"
+                    : "Kliknij i przeciągnij, aby zaznaczyć kiedy jesteś dostępny")
                 : "Ciemniejszy kolor = więcej osób dostępnych"}
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <AvailabilityLegend mode={viewMode} />
+            {isMobile && viewMode === "edit" && participantId && (
+              <div className="flex gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    // Select all slots
+                    const allSlots: TimeSlot[] = [];
+                    const startDateObj = new Date(event.startDate);
+                    const endDateObj = new Date(event.endDate);
+                    for (let d = new Date(startDateObj); d <= endDateObj; d.setDate(d.getDate() + 1)) {
+                      const dateKey = format(d, "yyyy-MM-dd");
+                      for (let t = event.startTime; t < event.endTime; t += event.slotDuration) {
+                        allSlots.push({ date: dateKey, time: t });
+                      }
+                    }
+                    handleSelectionChange(allSlots);
+                  }}
+                >
+                  Zaznacz wszystko
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => handleSelectionChange([])}
+                >
+                  Wyczyść wszystko
+                </Button>
+              </div>
+            )}
             <Separator />
             <TimeGrid
               startDate={new Date(event.startDate)}
@@ -457,6 +517,7 @@ export default function EventPage({
               heatmapData={viewMode === "view" ? availability : undefined}
               totalParticipants={totalParticipants}
               participantNames={participantNames}
+              isMobile={isMobile}
             />
           </CardContent>
         </Card>

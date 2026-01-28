@@ -111,22 +111,25 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
       );
     }
 
-    // Delete all existing availabilities for this participant
-    await prisma.availability.deleteMany({
-      where: { participantId },
-    });
-
-    // Create new availabilities
-    if (slots.length > 0) {
-      await prisma.availability.createMany({
-        data: slots.map((slot: { date: string; time: number }) => ({
-          participantId,
-          date: new Date(slot.date),
-          startTime: slot.time,
-          endTime: slot.time + event.slotDuration,
-        })),
+    // Use transaction to ensure atomicity and prevent race conditions
+    await prisma.$transaction(async (tx) => {
+      // Delete all existing availabilities for this participant
+      await tx.availability.deleteMany({
+        where: { participantId },
       });
-    }
+
+      // Create new availabilities
+      if (slots.length > 0) {
+        await tx.availability.createMany({
+          data: slots.map((slot: { date: string; time: number }) => ({
+            participantId,
+            date: new Date(slot.date),
+            startTime: slot.time,
+            endTime: slot.time + event.slotDuration,
+          })),
+        });
+      }
+    });
 
     // Fetch updated availabilities
     const updatedAvailabilities = await prisma.availability.findMany({

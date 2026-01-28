@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useCallback, Fragment } from "react";
+import { useMemo, useCallback } from "react";
 import { format } from "date-fns";
 import { pl } from "date-fns/locale";
 import { cn } from "@/lib/utils";
@@ -31,6 +31,7 @@ interface TimeGridProps {
   heatmapData?: Record<string, Record<number, string[]>>;
   totalParticipants?: number;
   participantNames?: Record<string, string>;
+  isMobile?: boolean;
 }
 
 // Format hour for display (e.g., 960 -> "16:00")
@@ -52,6 +53,7 @@ export function TimeGrid({
   heatmapData,
   totalParticipants = 0,
   participantNames = {},
+  isMobile = false,
 }: TimeGridProps) {
   const dates = useMemo(
     () => generateDateRange(startDate, endDate),
@@ -77,12 +79,13 @@ export function TimeGrid({
     return set;
   }, [selectedSlots]);
 
-  const { containerRef, getSlotState, handlers } = useTimeGridSelection({
+  const { containerRef, getSlotState, handlers, selectColumn, selectHour } = useTimeGridSelection({
     onSelectionChange,
     existingSelection: selectedSet,
     disabled: disabled || mode === "view",
     dates: dateKeys,
     times: timeSlots,
+    isMobile,
   });
 
   // Calculate slots per hour
@@ -113,8 +116,10 @@ export function TimeGrid({
     [heatmapData, participantNames]
   );
 
-  // Cell height - smaller cells like when2meet
-  const cellHeight = mode === "view" ? 14 : 18; // pixels
+  // Cell height - larger on mobile for easier touch targets
+  const cellHeight = mode === "view"
+    ? (isMobile ? 24 : 14)
+    : (isMobile ? 32 : 18); // pixels
 
   // Check if time is start of hour
   const isHourStart = (time: number) => time % 60 === 0;
@@ -138,12 +143,20 @@ export function TimeGrid({
           style={{ minWidth: `${48 + dates.length * 50}px` }}
         >
           <div className="w-12 shrink-0 sticky left-0 z-10 bg-background" />
-          {dates.map((date) => {
+          {dates.map((date, dateIndex) => {
             const dateKey = format(date, "yyyy-MM-dd");
+            const isClickable = isMobile && mode === "edit" && !disabled;
             return (
               <div
                 key={dateKey}
-                className="flex-1 min-w-[50px] p-1.5 text-center text-xs font-medium border-b border-l bg-muted/50"
+                className={cn(
+                  "flex-1 min-w-[50px] p-1.5 text-center text-xs font-medium border-b border-l bg-muted/50",
+                  isClickable && "cursor-pointer hover:bg-muted select-none"
+                )}
+                style={isClickable ? { touchAction: "manipulation" } : undefined}
+                onTouchStart={isClickable ? (e) => e.stopPropagation() : undefined}
+                onTouchEnd={isClickable ? (e) => e.stopPropagation() : undefined}
+                onClick={isClickable ? () => selectColumn(dateIndex) : undefined}
               >
                 <div className="text-muted-foreground text-[10px]">
                   {format(date, "EEE", { locale: pl })}
@@ -166,16 +179,38 @@ export function TimeGrid({
               className="flex"
               style={{ minWidth: `${48 + dates.length * 50}px` }}
             >
-              {/* Time label - only show for hour starts */}
+              {/* Time label - only show for hour starts, clickable on mobile */}
               <div
                 className={cn(
                   "w-12 shrink-0 sticky left-0 z-10 bg-background text-right pr-2 flex items-start justify-end",
-                  isLastSlotInHour && "border-b"
+                  isLastSlotInHour && "border-b",
+                  isMobile && mode === "edit" && !disabled && showLabel && "cursor-pointer hover:bg-muted"
                 )}
-                style={{ height: `${cellHeight}px` }}
+                style={{
+                  height: `${cellHeight}px`,
+                  ...(isMobile && mode === "edit" && !disabled && showLabel ? { touchAction: "manipulation" } : {})
+                }}
+                onTouchStart={
+                  isMobile && mode === "edit" && !disabled && showLabel
+                    ? (e) => e.stopPropagation()
+                    : undefined
+                }
+                onTouchEnd={
+                  isMobile && mode === "edit" && !disabled && showLabel
+                    ? (e) => e.stopPropagation()
+                    : undefined
+                }
+                onClick={
+                  isMobile && mode === "edit" && !disabled && showLabel
+                    ? () => selectHour(timeIndex, slotsPerHour)
+                    : undefined
+                }
               >
                 {showLabel && (
-                  <span className="text-[11px] text-muted-foreground -mt-0.5">
+                  <span className={cn(
+                    "text-[11px] text-muted-foreground -mt-0.5",
+                    isMobile && "select-none"
+                  )}>
                     {formatHourLabel(time)}
                   </span>
                 )}
@@ -233,10 +268,6 @@ export function TimeGrid({
         })}
       </div>
 
-      {/* Mobile scroll indicator */}
-      {dates.length > 5 && (
-        <div className="md:hidden absolute right-0 top-0 bottom-0 w-8 bg-gradient-to-l from-background to-transparent pointer-events-none" />
-      )}
     </div>
   );
 }

@@ -13,6 +13,7 @@ interface UseTimeGridSelectionOptions {
   disabled?: boolean;
   dates: string[]; // Array of date keys in order
   times: number[]; // Array of time slots in order
+  isMobile?: boolean; // Use tap-to-toggle instead of drag on mobile
 }
 
 interface SelectionState {
@@ -21,6 +22,16 @@ interface SelectionState {
   startSlot: { dateIndex: number; timeIndex: number } | null;
   endSlot: { dateIndex: number; timeIndex: number } | null;
 }
+
+// Touch tracking for distinguishing tap from scroll
+interface TouchState {
+  startX: number;
+  startY: number;
+  slotKey: string | null;
+  moved: boolean;
+}
+
+const TOUCH_MOVE_THRESHOLD = 10; // pixels - if finger moves more than this, it's a scroll not a tap
 
 export function createSlotKey(date: string, time: number): string {
   return `${date}:${time}`;
@@ -72,6 +83,7 @@ export function useTimeGridSelection({
   disabled = false,
   dates,
   times,
+  isMobile = false,
 }: UseTimeGridSelectionOptions) {
   const [state, setState] = useState<SelectionState>({
     isSelecting: false,
@@ -82,6 +94,9 @@ export function useTimeGridSelection({
 
   const containerRef = useRef<HTMLDivElement>(null);
 
+  // Track touch state for mobile tap detection
+  const touchStateRef = useRef<TouchState | null>(null);
+
   const getSlotFromElement = useCallback((element: Element | null): string | null => {
     if (!element) return null;
     const slotElement = element.closest("[data-slot]");
@@ -91,6 +106,12 @@ export function useTimeGridSelection({
   const handlePointerDown = useCallback(
     (e: React.PointerEvent) => {
       if (disabled) return;
+
+      // On mobile, handle via touch events instead (tap-to-toggle)
+      // pointerType "touch" indicates a touch event on mobile
+      if (isMobile && e.pointerType === "touch") {
+        return; // Let touch events handle this
+      }
 
       const slotKey = getSlotFromElement(e.target as Element);
       if (!slotKey) return;
@@ -112,11 +133,16 @@ export function useTimeGridSelection({
       // Capture pointer for smooth dragging
       (e.target as HTMLElement).setPointerCapture(e.pointerId);
     },
-    [disabled, existingSelection, getSlotFromElement, dates, times]
+    [disabled, existingSelection, getSlotFromElement, dates, times, isMobile]
   );
 
   const handlePointerMove = useCallback(
     (e: React.PointerEvent) => {
+      // On mobile, don't handle pointer move for touch - allow native scroll
+      if (isMobile && e.pointerType === "touch") {
+        return;
+      }
+
       if (!state.isSelecting || disabled) return;
 
       const element = document.elementFromPoint(e.clientX, e.clientY);
@@ -132,11 +158,16 @@ export function useTimeGridSelection({
         endSlot: indices,
       }));
     },
-    [state.isSelecting, disabled, getSlotFromElement, dates, times]
+    [state.isSelecting, disabled, getSlotFromElement, dates, times, isMobile]
   );
 
   const handlePointerUp = useCallback(
     (e: React.PointerEvent) => {
+      // On mobile touch, handled by touch events
+      if (isMobile && e.pointerType === "touch") {
+        return;
+      }
+
       if (!state.isSelecting || !state.startSlot || !state.endSlot) return;
 
       // Compute rectangle selection
@@ -171,7 +202,7 @@ export function useTimeGridSelection({
         endSlot: null,
       });
     },
-    [state, existingSelection, onSelectionChange, dates, times]
+    [state, existingSelection, onSelectionChange, dates, times, isMobile]
   );
 
   // Prevent context menu during selection
@@ -190,6 +221,19 @@ export function useTimeGridSelection({
       const element = document.elementFromPoint(touch.clientX, touch.clientY);
       const slotKey = getSlotFromElement(element);
 
+      // On mobile: record touch start position for tap detection
+      // We'll decide on touchEnd whether it was a tap or scroll
+      if (isMobile) {
+        touchStateRef.current = {
+          startX: touch.clientX,
+          startY: touch.clientY,
+          slotKey: slotKey, // May be null if touched header or empty area
+          moved: false,
+        };
+        return;
+      }
+
+      // Desktop touch: start drag selection
       if (!slotKey) return;
 
       const indices = getSlotIndices(slotKey, dates, times);
@@ -204,14 +248,26 @@ export function useTimeGridSelection({
         endSlot: indices,
       });
     },
-    [disabled, existingSelection, getSlotFromElement, dates, times]
+    [disabled, existingSelection, getSlotFromElement, dates, times, isMobile]
   );
 
   const handleTouchMove = useCallback(
     (e: React.TouchEvent) => {
+      // On mobile: track if finger moved significantly (indicates scroll, not tap)
+      if (isMobile && touchStateRef.current) {
+        const touch = e.touches[0];
+        const deltaX = Math.abs(touch.clientX - touchStateRef.current.startX);
+        const deltaY = Math.abs(touch.clientY - touchStateRef.current.startY);
+
+        if (deltaX > TOUCH_MOVE_THRESHOLD || deltaY > TOUCH_MOVE_THRESHOLD) {
+          touchStateRef.current.moved = true;
+        }
+        return; // Allow native scroll
+      }
+
       if (!state.isSelecting || disabled) return;
 
-      e.preventDefault(); // Prevent scrolling
+      e.preventDefault(); // Prevent scrolling (desktop touch only)
 
       const touch = e.touches[0];
       const element = document.elementFromPoint(touch.clientX, touch.clientY);
@@ -227,10 +283,28 @@ export function useTimeGridSelection({
         endSlot: indices,
       }));
     },
-    [state.isSelecting, disabled, getSlotFromElement, dates, times]
+    [state.isSelecting, disabled, getSlotFromElement, dates, times, isMobile]
   );
 
   const handleTouchEnd = useCallback(() => {
+    // On mobile: execute tap-to-toggle only if finger didn't move (wasn't scrolling)
+    if (isMobile) {
+      const touchState = touchStateRef.current;
+      touchStateRef.current = null;
+
+      if (touchState && !touchState.moved && touchState.slotKey) {
+        const newSelection = new Set(existingSelection);
+        if (newSelection.has(touchState.slotKey)) {
+          newSelection.delete(touchState.slotKey);
+        } else {
+          newSelection.add(touchState.slotKey);
+        }
+        const slots = Array.from(newSelection).map(parseSlotKey);
+        onSelectionChange(slots);
+      }
+      return;
+    }
+
     if (!state.isSelecting || !state.startSlot || !state.endSlot) return;
 
     // Compute rectangle selection
@@ -256,7 +330,109 @@ export function useTimeGridSelection({
       startSlot: null,
       endSlot: null,
     });
-  }, [state, existingSelection, onSelectionChange, dates, times]);
+  }, [state, existingSelection, onSelectionChange, dates, times, isMobile]);
+
+  // Bulk selection functions for mobile
+  const selectColumn = useCallback(
+    (dateIndex: number) => {
+      if (disabled || dateIndex < 0 || dateIndex >= dates.length) return;
+
+      const dateKey = dates[dateIndex];
+      const columnSlots = times.map((time) => createSlotKey(dateKey, time));
+
+      // Check if all slots in column are already selected
+      const allSelected = columnSlots.every((slot) => existingSelection.has(slot));
+
+      const newSelection = new Set(existingSelection);
+      if (allSelected) {
+        // Deselect all in column
+        columnSlots.forEach((slot) => newSelection.delete(slot));
+      } else {
+        // Select all in column
+        columnSlots.forEach((slot) => newSelection.add(slot));
+      }
+
+      const slots = Array.from(newSelection).map(parseSlotKey);
+      onSelectionChange(slots);
+    },
+    [disabled, dates, times, existingSelection, onSelectionChange]
+  );
+
+  const selectRow = useCallback(
+    (timeIndex: number) => {
+      if (disabled || timeIndex < 0 || timeIndex >= times.length) return;
+
+      const time = times[timeIndex];
+      const rowSlots = dates.map((dateKey) => createSlotKey(dateKey, time));
+
+      // Check if all slots in row are already selected
+      const allSelected = rowSlots.every((slot) => existingSelection.has(slot));
+
+      const newSelection = new Set(existingSelection);
+      if (allSelected) {
+        // Deselect all in row
+        rowSlots.forEach((slot) => newSelection.delete(slot));
+      } else {
+        // Select all in row
+        rowSlots.forEach((slot) => newSelection.add(slot));
+      }
+
+      const slots = Array.from(newSelection).map(parseSlotKey);
+      onSelectionChange(slots);
+    },
+    [disabled, dates, times, existingSelection, onSelectionChange]
+  );
+
+  // Select all rows within an hour (from startTimeIndex for slotsPerHour count)
+  const selectHour = useCallback(
+    (startTimeIndex: number, slotsPerHour: number) => {
+      if (disabled) return;
+
+      // Collect all slots in this hour
+      const hourSlots: string[] = [];
+      for (let i = 0; i < slotsPerHour && (startTimeIndex + i) < times.length; i++) {
+        const time = times[startTimeIndex + i];
+        dates.forEach((dateKey) => {
+          hourSlots.push(createSlotKey(dateKey, time));
+        });
+      }
+
+      // Check if all slots in hour are already selected
+      const allSelected = hourSlots.every((slot) => existingSelection.has(slot));
+
+      const newSelection = new Set(existingSelection);
+      if (allSelected) {
+        // Deselect all in hour
+        hourSlots.forEach((slot) => newSelection.delete(slot));
+      } else {
+        // Select all in hour
+        hourSlots.forEach((slot) => newSelection.add(slot));
+      }
+
+      const slots = Array.from(newSelection).map(parseSlotKey);
+      onSelectionChange(slots);
+    },
+    [disabled, dates, times, existingSelection, onSelectionChange]
+  );
+
+  const selectAll = useCallback(() => {
+    if (disabled) return;
+
+    const allSlots: string[] = [];
+    dates.forEach((dateKey) => {
+      times.forEach((time) => {
+        allSlots.push(createSlotKey(dateKey, time));
+      });
+    });
+
+    const slots = allSlots.map(parseSlotKey);
+    onSelectionChange(slots);
+  }, [disabled, dates, times, onSelectionChange]);
+
+  const clearAll = useCallback(() => {
+    if (disabled) return;
+    onSelectionChange([]);
+  }, [disabled, onSelectionChange]);
 
   // Calculate slot state for rendering
   const getSlotState = useCallback(
@@ -281,6 +457,12 @@ export function useTimeGridSelection({
     containerRef,
     state,
     getSlotState,
+    // Bulk selection functions
+    selectColumn,
+    selectRow,
+    selectHour,
+    selectAll,
+    clearAll,
     handlers: {
       onPointerDown: handlePointerDown,
       onPointerMove: handlePointerMove,
