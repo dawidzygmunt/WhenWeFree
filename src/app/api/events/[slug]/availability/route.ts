@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
+import { Prisma } from "@prisma/client";
 import { updateAvailabilitySchema } from "@/lib/validations";
 
 interface RouteParams {
@@ -112,7 +113,7 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
     }
 
     // Use transaction to ensure atomicity and prevent race conditions
-    await prisma.$transaction(async (tx) => {
+    await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
       // Delete all existing availabilities for this participant
       await tx.availability.deleteMany({
         where: { participantId },
